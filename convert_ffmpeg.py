@@ -31,6 +31,7 @@ s3 = boto3.client("s3", region_name=AWS_REGION)
 
 print("FFmpeg S3 Video Converter initialized successfully.")
 
+
 # Define rendition settings - EXACT MATCH to convert_video.py
 RENDITIONS = [
     {"height": 240, "width": 426, "bitrate": 200000, "name_modifier": "240p"},  # 200 KBit/s
@@ -270,12 +271,10 @@ def submit_job(input_key, input_bucket, output_bucket, output_prefix, s3_input_f
     
     # Parse destination for upload
     dest_path = destination.replace(f"s3://{output_bucket}/", "")
-    # MediaConvert appends "MASTER" to destination (line 85 in convert_video.py)
-    dest_path_with_master = dest_path + "MASTER"
     
     print(f"\n{'='*60}")
     print(f"Processing: {input_key}")
-    print(f"Output destination: {destination}MASTER")
+    print(f"Output destination: {destination}")
     print(f"{'='*60}")
     
     # Create temporary directory for processing
@@ -305,7 +304,7 @@ def submit_job(input_key, input_bucket, output_bucket, output_prefix, s3_input_f
         
         # Step 3: Upload to S3
         print("\n[3/4] Uploading to S3...")
-        if not upload_directory_to_s3(temp_output, output_bucket, dest_path_with_master):
+        if not upload_directory_to_s3(temp_output, output_bucket, dest_path):
             return False
         
         # Step 4: Cleanup
@@ -315,7 +314,7 @@ def submit_job(input_key, input_bucket, output_bucket, output_prefix, s3_input_f
         
         print(f"\n{'='*60}")
         print(f"✅ Successfully processed: {input_key}")
-        print(f"   Output: {destination}MASTER")
+        print(f"   Output: {destination}")
         print(f"   Renditions: {len(RENDITIONS)} ({', '.join([r['name_modifier'] for r in RENDITIONS])})")
         print(f"{'='*60}\n")
         
@@ -400,10 +399,6 @@ if __name__ == "__main__":
         sys.exit(0)
 
     print(f"Found {len(video_keys_to_process)} new video(s) to process. Starting conversion...")
-    print(f"\n💰 Cost Savings: FFmpeg processing costs ~85-90% less than MediaConvert")
-    print(f"   Estimated MediaConvert cost: ${len(video_keys_to_process) * 0.60:.2f}")
-    print(f"   Estimated FFmpeg cost: ${len(video_keys_to_process) * 0.06:.2f}")
-    print(f"   Savings: ${len(video_keys_to_process) * 0.54:.2f}\n")
     
     success_count = 0
     failed_count = 0
