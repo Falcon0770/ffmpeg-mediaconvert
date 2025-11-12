@@ -179,7 +179,7 @@ def convert_video_ffmpeg(input_path, output_dir, input_file_name):
         master_playlist += f'CODECS="avc1.4d401f,mp4a.40.2",'
         master_playlist += f'RESOLUTION={rendition["width"]}x{rendition["height"]},'
         master_playlist += f'FRAME-RATE={fps:.3f}\n'
-        master_playlist += f"MASTER{rendition['name_modifier']}.m3u8\n"
+        master_playlist += f"MASTER_{rendition['name_modifier']}.m3u8\n"
     
     master_file = os.path.join(output_dir, "MASTER.m3u8")
     with open(master_file, 'w') as f:
