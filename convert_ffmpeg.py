@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import shutil
 import random
+import signal
 from pathlib import Path
 
 # Import fcntl for Linux file locking (EC2)
@@ -35,6 +36,9 @@ PROCESSED_LOG_FILE = "processed_videos.json"
 
 # File to track videos currently being processed (in-progress lock)
 IN_PROGRESS_FILE = "in_progress_videos.json"
+
+# Global variable to track current video being processed (for cleanup on interrupt)
+CURRENT_VIDEO_KEY = None
 
 # Define your AWS region
 AWS_REGION = "us-east-1"
@@ -511,6 +515,19 @@ def mark_video_failed(video_key):
         print(f"❌ Error marking video failed: {e}")
         return False
 
+def signal_handler(sig, frame):
+    """
+    Handle Ctrl+C and other interrupts gracefully
+    Release the current video lock before exiting
+    """
+    global CURRENT_VIDEO_KEY
+    print("\n\n⚠️  Interrupt received! Cleaning up...")
+    if CURRENT_VIDEO_KEY:
+        print(f"🔓 Releasing lock on: {CURRENT_VIDEO_KEY}")
+        mark_video_failed(CURRENT_VIDEO_KEY)
+    print("✅ Cleanup complete. Exiting.")
+    sys.exit(0)
+
 # Main execution - EXACT MATCH to convert_video.py lines 246-295
 if __name__ == "__main__":
     # Check FFmpeg availability first
@@ -526,6 +543,10 @@ if __name__ == "__main__":
     parser.add_argument("--force", action="store_true", help="Force reprocessing all videos, ignoring processed_videos.json")
     args = parser.parse_args()
 
+    # Register signal handler for graceful shutdown
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
     s3_input_folder_prefix = args.s3_input_folder_prefix
     input_bucket = args.input_bucket
     output_bucket = args.output_bucket
@@ -574,6 +595,9 @@ if __name__ == "__main__":
             print("\n✅ No more videos to process.")
             break
         
+        # Set current video for signal handler
+        CURRENT_VIDEO_KEY = input_key
+        
         print(f"\n{'='*60}")
         print(f"🎬 Acquired video: {input_key}")
         print(f"{'='*60}")
@@ -591,6 +615,9 @@ if __name__ == "__main__":
             mark_video_failed(input_key)
             failed_count += 1
             print(f"\n❌ Video marked as FAILED (can be retried)")
+        
+        # Clear current video after processing
+        CURRENT_VIDEO_KEY = None
         
         # Show current progress
         total_processed = len(load_processed_videos())
