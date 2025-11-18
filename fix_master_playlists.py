@@ -23,7 +23,7 @@ for key in videos_to_fix:
         content = response['Body'].read().decode('utf-8')
         
         print("  Original content:")
-        for line in content.split('\n'):
+        for line in content.split('\n'): 
             if '.m3u8' in line:
                 print(f"    {line}")
         
@@ -55,4 +55,3 @@ for key in videos_to_fix:
 print("\n" + "="*80)
 print("✅ All MASTER.m3u8 files have been fixed!")
 print("Now the videos should play correctly.")
-

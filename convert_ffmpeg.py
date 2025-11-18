@@ -8,7 +8,17 @@ import argparse
 import subprocess
 import tempfile
 import shutil
+import random
 from pathlib import Path
+
+# Import fcntl for Linux file locking (EC2)
+try:
+    import fcntl
+    LOCK_AVAILABLE = True
+except ImportError:
+    # Windows doesn't have fcntl, fallback to basic operation
+    LOCK_AVAILABLE = False
+    print("⚠️  Warning: File locking not available on this platform. Parallel processing may cause conflicts.")
 
 # Fix Windows console encoding for emojis
 if sys.platform == "win32":
@@ -22,6 +32,9 @@ Cost savings: 85-90% compared to MediaConvert
 
 # Define processed videos log file
 PROCESSED_LOG_FILE = "processed_videos.json"
+
+# File to track videos currently being processed (in-progress lock)
+IN_PROGRESS_FILE = "in_progress_videos.json"
 
 # Define your AWS region
 AWS_REGION = "us-east-1"
@@ -349,17 +362,154 @@ def list_s3_video_objects(bucket_name, prefix):
                     video_objects.append(key)
     return video_objects
 
+def load_json_file_with_lock(file_path, lock_type=fcntl.LOCK_SH if LOCK_AVAILABLE else None):
+    """
+    Load JSON file with file locking for thread-safe reads
+    """
+    if not os.path.exists(file_path):
+        return []
+    
+    try:
+        with open(file_path, 'r') as f:
+            if LOCK_AVAILABLE and lock_type:
+                fcntl.flock(f.fileno(), lock_type)
+            try:
+                data = json.load(f)
+            finally:
+                if LOCK_AVAILABLE and lock_type:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        return data
+    except json.JSONDecodeError:
+        return []
+    except Exception as e:
+        print(f"⚠️  Warning: Could not read {file_path}: {e}")
+        return []
+
+def save_json_file_with_lock(file_path, data):
+    """
+    Save JSON file with exclusive file locking for thread-safe writes
+    """
+    try:
+        with open(file_path, 'w') as f:
+            if LOCK_AVAILABLE:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                json.dump(data, f, indent=4)
+            finally:
+                if LOCK_AVAILABLE:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        return True
+    except Exception as e:
+        print(f"❌ Error saving {file_path}: {e}")
+        return False
+
 def load_processed_videos():
-    """Load list of already processed videos - EXACT MATCH to convert_video.py lines 235-239"""
-    if os.path.exists(PROCESSED_LOG_FILE):
-        with open(PROCESSED_LOG_FILE, 'r') as f:
-            return set(json.load(f))
-    return set()
+    """Load list of already processed videos with thread-safe locking"""
+    data = load_json_file_with_lock(PROCESSED_LOG_FILE, fcntl.LOCK_SH if LOCK_AVAILABLE else None)
+    return set(data)
 
 def save_processed_videos(processed_videos):
-    """Save list of processed videos - EXACT MATCH to convert_video.py lines 241-243"""
-    with open(PROCESSED_LOG_FILE, 'w') as f:
-        json.dump(list(processed_videos), f, indent=4)
+    """Save list of processed videos with thread-safe locking"""
+    save_json_file_with_lock(PROCESSED_LOG_FILE, list(processed_videos))
+
+def load_in_progress_videos():
+    """Load list of videos currently being processed"""
+    data = load_json_file_with_lock(IN_PROGRESS_FILE, fcntl.LOCK_SH if LOCK_AVAILABLE else None)
+    return set(data)
+
+def save_in_progress_videos(in_progress_videos):
+    """Save list of videos currently being processed"""
+    save_json_file_with_lock(IN_PROGRESS_FILE, list(in_progress_videos))
+
+def acquire_next_video(all_videos, max_retries=10):
+    """
+    Thread-safe way to get the next video to process
+    Returns: (video_key, should_continue) - video_key is None if no videos available
+    """
+    for attempt in range(max_retries):
+        try:
+            # Open processed videos file with exclusive lock
+            with open(PROCESSED_LOG_FILE, 'r+') as pf:
+                if LOCK_AVAILABLE:
+                    fcntl.flock(pf.fileno(), fcntl.LOCK_EX)
+                
+                try:
+                    # Load both processed and in-progress videos
+                    processed = set(json.load(pf) if os.path.getsize(PROCESSED_LOG_FILE) > 0 else [])
+                    
+                    # Also check in-progress file
+                    in_progress = load_in_progress_videos()
+                    
+                    # Find a video that's neither processed nor in progress
+                    available_videos = [v for v in all_videos if v not in processed and v not in in_progress]
+                    
+                    if not available_videos:
+                        return None, False  # No more videos to process
+                    
+                    # Pick the first available video
+                    selected_video = available_videos[0]
+                    
+                    # Mark it as in-progress
+                    in_progress.add(selected_video)
+                    save_in_progress_videos(in_progress)
+                    
+                    return selected_video, True
+                    
+                finally:
+                    if LOCK_AVAILABLE:
+                        fcntl.flock(pf.fileno(), fcntl.LOCK_UN)
+                        
+        except FileNotFoundError:
+            # Create the file if it doesn't exist
+            with open(PROCESSED_LOG_FILE, 'w') as f:
+                json.dump([], f)
+            # Retry
+            time.sleep(random.uniform(0.1, 0.5))
+            continue
+            
+        except Exception as e:
+            print(f"⚠️  Attempt {attempt + 1}/{max_retries} failed: {e}")
+            time.sleep(random.uniform(0.5, 1.5))
+            continue
+    
+    # Max retries exceeded
+    print("❌ Could not acquire lock after maximum retries")
+    return None, False
+
+def mark_video_complete(video_key):
+    """
+    Mark a video as completed (move from in-progress to processed)
+    """
+    try:
+        # Add to processed list
+        processed = load_processed_videos()
+        processed.add(video_key)
+        save_processed_videos(processed)
+        
+        # Remove from in-progress list
+        in_progress = load_in_progress_videos()
+        if video_key in in_progress:
+            in_progress.remove(video_key)
+            save_in_progress_videos(in_progress)
+        
+        return True
+    except Exception as e:
+        print(f"❌ Error marking video complete: {e}")
+        return False
+
+def mark_video_failed(video_key):
+    """
+    Remove video from in-progress (so it can be retried later)
+    """
+    try:
+        in_progress = load_in_progress_videos()
+        if video_key in in_progress:
+            in_progress.remove(video_key)
+            save_in_progress_videos(in_progress)
+        return True
+    except Exception as e:
+        print(f"❌ Error marking video failed: {e}")
+        return False
 
 # Main execution - EXACT MATCH to convert_video.py lines 246-295
 if __name__ == "__main__":
@@ -382,54 +532,99 @@ if __name__ == "__main__":
     output_prefix = args.output_prefix
     force_reprocess = args.force
 
-    processed_videos = load_processed_videos()
-    print(f"Loaded {len(processed_videos)} previously processed videos.")
-
+    # Get all videos from S3
     print(f"Listing video objects in s3://{input_bucket}/{s3_input_folder_prefix}...")
     all_video_keys = list_s3_video_objects(input_bucket, s3_input_folder_prefix)
+    
+    if not all_video_keys:
+        print(f"No video files found in s3://{input_bucket}/{s3_input_folder_prefix}")
+        sys.exit(0)
+    
+    # Load processed and in-progress videos
+    processed_videos = load_processed_videos()
+    in_progress_videos = load_in_progress_videos()
+    
+    print(f"📊 Status:")
+    print(f"   Total videos in S3: {len(all_video_keys)}")
+    print(f"   Already processed: {len(processed_videos)}")
+    print(f"   Currently in progress: {len(in_progress_videos)}")
+    print(f"   Available to process: {len([v for v in all_video_keys if v not in processed_videos and v not in in_progress_videos])}")
 
     if force_reprocess:
-        print("Force reprocessing enabled. All videos will be processed.")
-        video_keys_to_process = all_video_keys
+        print("\n⚠️  Force reprocessing enabled. Clearing processed and in-progress lists...")
+        save_processed_videos(set())
+        save_in_progress_videos(set())
+        print("All videos will be reprocessed.")
+    
+    print(f"\n🚀 Starting video conversion (parallel-safe mode)...")
+    if LOCK_AVAILABLE:
+        print("✅ File locking enabled - safe for parallel processing")
     else:
-        video_keys_to_process = [key for key in all_video_keys if key not in processed_videos]
-
-    if not video_keys_to_process:
-        print(f"No new video files found in s3://{input_bucket}/{s3_input_folder_prefix} to process.")
-        sys.exit(0)
-
-    print(f"Found {len(video_keys_to_process)} new video(s) to process. Starting conversion...")
+        print("⚠️  File locking not available - avoid running multiple instances")
     
     success_count = 0
     failed_count = 0
     
-    for input_key in video_keys_to_process:
-        print(f"\nProcessing video {success_count + failed_count + 1}/{len(video_keys_to_process)}")
+    # Process videos one at a time, but use thread-safe acquisition
+    while True:
+        # Acquire next video to process
+        input_key, should_continue = acquire_next_video(all_video_keys)
         
+        if not should_continue or input_key is None:
+            print("\n✅ No more videos to process.")
+            break
+        
+        print(f"\n{'='*60}")
+        print(f"🎬 Acquired video: {input_key}")
+        print(f"{'='*60}")
+        
+        # Process the video
         success = submit_job(input_key, input_bucket, output_bucket, output_prefix, s3_input_folder_prefix)
         
         if success:
-            # Add to processed list after successful completion
-            processed_videos.add(input_key)
-            save_processed_videos(processed_videos)
+            # Mark as complete
+            mark_video_complete(input_key)
             success_count += 1
+            print(f"\n✅ Video marked as COMPLETED")
         else:
+            # Mark as failed (removes from in-progress so it can be retried)
+            mark_video_failed(input_key)
             failed_count += 1
+            print(f"\n❌ Video marked as FAILED (can be retried)")
         
-        print(f"\n📊 Progress: {success_count + failed_count}/{len(video_keys_to_process)} " +
-              f"(✅ {success_count} | ❌ {failed_count})")
+        # Show current progress
+        total_processed = len(load_processed_videos())
+        total_in_progress = len(load_in_progress_videos())
+        remaining = len([v for v in all_video_keys if v not in load_processed_videos() and v not in load_in_progress_videos()])
+        
+        print(f"\n📊 Overall Progress:")
+        print(f"   ✅ Completed: {total_processed}/{len(all_video_keys)}")
+        print(f"   🔄 In Progress (all workers): {total_in_progress}")
+        print(f"   ⏳ Remaining: {remaining}")
+        print(f"   This worker: ✅ {success_count} | ❌ {failed_count}")
 
     print("\n" + "="*60)
-    print("Processing Complete!")
+    print("🏁 Worker Finished!")
     print("="*60)
-    print(f"✅ Successful: {success_count}")
-    print(f"❌ Failed: {failed_count}")
-    print(f"📋 Total: {len(video_keys_to_process)}")
+    print(f"This worker processed:")
+    print(f"   ✅ Successful: {success_count}")
+    print(f"   ❌ Failed: {failed_count}")
+    print(f"   📋 Total: {success_count + failed_count}")
     print("="*60)
     
-    if failed_count > 0:
-        print("\n⚠️  Some videos failed to process. Check the output above for details.")
-        sys.exit(1)
+    # Show overall status
+    final_processed = len(load_processed_videos())
+    final_in_progress = len(load_in_progress_videos())
+    final_remaining = len([v for v in all_video_keys if v not in load_processed_videos() and v not in load_in_progress_videos()])
+    
+    print(f"\n📊 Overall Status (all workers):")
+    print(f"   ✅ Completed: {final_processed}/{len(all_video_keys)}")
+    print(f"   🔄 In Progress: {final_in_progress}")
+    print(f"   ⏳ Remaining: {final_remaining}")
+    print("="*60)
+    
+    if final_remaining > 0 or final_in_progress > 0:
+        print("\n💡 Tip: Other workers may still be processing, or you can run this script again to continue.")
     else:
-        print("\n🎉 All videos processed successfully!")
+        print("\n🎉 All videos have been processed!")
 
