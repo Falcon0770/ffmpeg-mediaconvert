@@ -22,16 +22,30 @@ sudo yum install -y python3 python3-pip
 echo "🖥️  Installing tmux..."
 sudo yum install -y tmux
 
-# Install AWS CLI v2 (if not already installed)
+# Install AWS CLI v2 (auto-detect architecture)
 echo "☁️  Installing AWS CLI..."
-if ! command -v aws &> /dev/null; then
+# Remove any existing broken installation
+sudo rm -rf /usr/local/aws-cli /usr/local/bin/aws /usr/local/bin/aws_completer 2>/dev/null
+
+# Detect architecture and download correct version
+ARCH=$(uname -m)
+if [ "$ARCH" = "aarch64" ]; then
+    echo "   Detected ARM64 architecture"
     curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip"
-    unzip awscliv2.zip
-    sudo ./aws/install
-    rm -rf aws awscliv2.zip
+elif [ "$ARCH" = "x86_64" ]; then
+    echo "   Detected x86_64 architecture"
+    curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
 else
-    echo "   AWS CLI already installed"
+    echo "   ⚠️  Unknown architecture: $ARCH"
+    exit 1
 fi
+
+# Install
+unzip -o awscliv2.zip
+sudo ./aws/install
+rm -rf aws awscliv2.zip
+
+echo "   ✅ AWS CLI installed successfully for $ARCH"
 
 # Install Python dependencies
 echo "📚 Installing Python dependencies..."
