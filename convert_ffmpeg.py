@@ -214,6 +214,11 @@ def download_from_s3(bucket, key, local_path):
         file_size = response['ContentLength']
         print(f"   File size: {file_size / (1024*1024):.2f} MB")
         
+        # Skip files that are too small (likely corrupted or metadata files)
+        if file_size < 1024:  # Less than 1KB
+            print(f"⚠️  Skipping file - too small ({file_size} bytes), likely corrupted or metadata file")
+            return False
+        
         s3.download_file(bucket, key, local_path)
         print(f"✅ Download complete: {local_path}")
         return True
@@ -362,6 +367,17 @@ def list_s3_video_objects(bucket_name, prefix):
         if "Contents" in page:
             for obj in page["Contents"]:
                 key = obj["Key"]
+                # Get filename from key
+                filename = key.split('/')[-1]
+                
+                # Skip macOS metadata files (._filename) and files with 0 size
+                if filename.startswith('._'):
+                    continue
+                
+                # Skip files that are too small (likely corrupted)
+                if obj.get('Size', 0) < 1024:  # Skip files smaller than 1KB
+                    continue
+                
                 if key.lower().endswith(video_extensions):
                     video_objects.append(key)
     return video_objects
