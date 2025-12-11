@@ -16,10 +16,10 @@ if [ $? == 0 ]; then
 fi
 
 # Your conversion parameters
-INPUT_FOLDER="MS Stream/AZ100T00"
+INPUT_FOLDER="Soft Skills/Soft Skills LiveStream/"
 INPUT_BUCKET="cdn.netcomplus.com"
 OUTPUT_BUCKET="cdn.netcomplus.com"
-OUTPUT_PREFIX="streams/MS Stream/AZ100T00"
+OUTPUT_PREFIX="streams/Soft Skills/Soft Skills LiveStream/"
 
 # Build the command
 CMD="python3 convert_ffmpeg.py \"$INPUT_FOLDER\" $INPUT_BUCKET $OUTPUT_BUCKET \"$OUTPUT_PREFIX\""
